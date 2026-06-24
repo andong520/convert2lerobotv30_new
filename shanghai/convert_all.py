@@ -658,8 +658,8 @@ if __name__ == "__main__":
     rclone_config = '/root/.config/rclone/rclone.conf'
     local_base_path = '/mnt/sdc/align'
 
-    excel_path = "/root/convert2lerobotv30_new/数据转换第三批次20260513 .xlsx"
-    sheet_name = "模型内部需求-上海"
+    excel_path = "/root/convert2lerobotv30_new/数据转换第4批次20260624.xlsx"
+    sheet_name = "模型内部需求"
     robot_type = "方舟无限arx-acone"
     output_base_path = '/mnt/sdc/arx_loong_shanghai_v30_limited60'
     # 转换脚本路径

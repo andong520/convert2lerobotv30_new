@@ -658,7 +658,7 @@ if __name__ == "__main__":
     rclone_config = '/root/.config/rclone/rclone.conf'
     local_base_path = '/mnt/sdc/align_qinglong_zz'
 
-    excel_path = "/root/convert2lerobotv30_new/数据转换第三批次20260513 .xlsx"
+    excel_path = "/root/convert2lerobotv30_new/数据转换第4批次20260624.xlsx"
     sheet_name = "郑州平台"
     robot_type = "青龙ROS2"
     output_base_path = '/mnt/sdc/qinglongros2_zhengzhou_v30_limited60'
