@@ -22,6 +22,9 @@ exec > >(tee -a "$LOG") 2>&1
 echo "[$(date)] ===== leju_zhengzhou: 全流程开始 ====="
 mkdir -p "$ALIGN_CACHE"
 rm -f "$STATUS"
+source "$BASE/pipelines/batch.conf"
+export BATCH_XLSX="$EXCEL"
+case "$DRIVER" in *zhengzhou*) export BATCH_SHEET="$SHEET_ZHENGZHOU";; *) export BATCH_SHEET="$SHEET_SHANGHAI";; esac
 echo "[$(date)] [1/4] H5 -> v30 ..."
 if ! $PY "$DRIVER"; then echo "[$(date)] !! v30 失败, 终止"; exit 1; fi
 echo "[$(date)] [2/4] v30 -> v21 (workers=$WORKERS) ..."
