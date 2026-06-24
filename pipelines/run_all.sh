@@ -4,7 +4,6 @@
 #   bash run_all.sh                 # 跑下面 QUEUE 里的全部
 #   bash run_all.sh leju gr2        # 只跑指定的几个(临时)
 #   改 QUEUE 增删/调序; 行首加 # 跳过某个
-set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG=/mnt/sdc/pipeline_run_all.log
 
@@ -22,8 +21,14 @@ QUEUE=(
   qinglongros2_zhengzhou
 )
 # ============================================================
-[ "${1:-}" = "upload" ] && { export UPLOAD=1; shift; }   # 首参 upload 开启上传(默认不传)
-[ $# -gt 0 ] && QUEUE=("$@")
+# 参数: --excel <xlsx> 选清单(所有机型); upload 开启上传(默认不传); 其余=机型名(留空=全部)
+ARGS=()
+while [ $# -gt 0 ]; do case "$1" in
+  --excel|-e) export EXCEL="$2"; shift 2 ;;
+  upload|--upload) export UPLOAD=1; shift ;;
+  *) ARGS+=("$1"); shift ;;
+esac; done
+[ ${#ARGS[@]} -gt 0 ] && QUEUE=("${ARGS[@]}")
 
 exec > >(tee -a "$LOG") 2>&1
 echo "[$(date)] ########## 串行队列启动: ${#QUEUE[@]} 个 -> ${QUEUE[*]} ##########"

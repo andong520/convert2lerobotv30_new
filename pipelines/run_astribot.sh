@@ -1,10 +1,18 @@
 #!/bin/bash
 # astribot 全流程: H5->v30 -> v30->v21 -> 校验 -> 上传   (60条限制保留, 由 convert_all 控制)
 set -o pipefail
-[ "${1:-}" = "upload" ] && UPLOAD=1   # 开启上传(默认不传); 等价 UPLOAD=1 bash 本脚本
+# 参数: --excel <xlsx> 选清单; --sheet <名> 覆盖sheet; upload 开启上传(默认不传)
+while [ $# -gt 0 ]; do case "$1" in
+  --excel|-e) EXCEL="$2"; shift 2 ;;
+  --sheet) SHEET="$2"; shift 2 ;;
+  upload|--upload) UPLOAD=1; shift ;;
+  *) shift ;;
+esac; done
 PY=/root/miniconda3/bin/python3
 BASE=/root/convert2lerobotv30_new
 # ===== per-robot 配置 (按需改) =====
+EXCEL="${EXCEL:-/root/convert2lerobotv30_new/数据转换第4批次20260624.xlsx}"   # ★任务清单 xlsx — 换批次改这里(或命令行 --excel 覆盖)
+SHEET="${SHEET:-模型内部需求}"   # sheet 名(--sheet 覆盖)
 DRIVER="$BASE/shanghai/convert_all_astribot.py"
 ALIGN_CACHE="/mnt/sdc/align_astribot"
 STATUS="/root/convert2lerobotv30_new/convert_all_astribots1_shanghai_status.txt"
@@ -22,9 +30,8 @@ exec > >(tee -a "$LOG") 2>&1
 echo "[$(date)] ===== astribot: 全流程开始 ====="
 mkdir -p "$ALIGN_CACHE"
 rm -f "$STATUS"
-source "$BASE/pipelines/batch.conf"
-export BATCH_XLSX="$EXCEL"
-case "$DRIVER" in *zhengzhou*) export BATCH_SHEET="$SHEET_ZHENGZHOU";; *) export BATCH_SHEET="$SHEET_SHANGHAI";; esac
+export BATCH_XLSX="$EXCEL"      # 传给驱动(由上面 EXCEL 行 / --excel 决定)
+export BATCH_SHEET="$SHEET"
 echo "[$(date)] [1/4] H5 -> v30 ..."
 if ! $PY "$DRIVER"; then echo "[$(date)] !! v30 失败, 终止"; exit 1; fi
 echo "[$(date)] [2/4] v30 -> v21 (workers=$WORKERS) ..."
