@@ -22,6 +22,7 @@ QUEUE=(
   qinglongros2_zhengzhou
 )
 # ============================================================
+[ "${1:-}" = "upload" ] && { export UPLOAD=1; shift; }   # 首参 upload 开启上传(默认不传)
 [ $# -gt 0 ] && QUEUE=("$@")
 
 exec > >(tee -a "$LOG") 2>&1

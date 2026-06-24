@@ -1,6 +1,7 @@
 #!/bin/bash
 # leju_zhengzhou 全流程: H5->v30 -> v30->v21 -> 校验 -> 上传   (60条限制保留, 由 convert_all 控制)
 set -o pipefail
+[ "${1:-}" = "upload" ] && UPLOAD=1   # 开启上传(默认不传); 等价 UPLOAD=1 bash 本脚本
 PY=/root/miniconda3/bin/python3
 BASE=/root/convert2lerobotv30_new
 # ===== per-robot 配置 (按需改) =====
@@ -27,13 +28,13 @@ echo "[$(date)] [2/4] v30 -> v21 (workers=$WORKERS) ..."
 if ! PATH=/root/miniconda3/bin:$PATH $PY /root/lerobot_v30_to_v21/convert.py --input "$V30" --output-dir "$V21" --batch --workers $WORKERS; then echo "[$(date)] !! v21 失败, 终止"; exit 1; fi
 echo "[$(date)] [3/4] 校验 v21 (state=$STATE_DIM cams=$CAMS) ..."
 if ! $PY "$BASE/pipelines/_verify_v21.py" --root "$V21" --state-dim "$STATE_DIM" --cams "$CAMS"; then echo "[$(date)] !! 校验未通过, 不上传, 请人工检查"; exit 2; fi
-if [ "${UPLOAD:-1}" = "1" ]; then
+if [ "${UPLOAD:-0}" = "1" ]; then
   echo "[$(date)] [4/4] 校验通过 -> 上传 $DEST/$ROBOT ..."
   rclone copy --config "$CFG" "$V21/" "$DEST/" --transfers 32 --checkers 32 --fast-list --multi-thread-streams 8 --tpslimit 50 --retries 10 --low-level-retries 20 --stats 2m --stats-one-line
   echo "[$(date)] 上传 rclone copy 退出码: $?"
   rclone check --config "$CFG" "$V21/$ROBOT/" "$DEST/$ROBOT/" --one-way
   echo "[$(date)] 上传核验 rclone check 退出码: $?"
 else
-  echo "[$(date)] [4/4] UPLOAD=0 -> 跳过上传 (v21 已生成: $V21, 校验已过)"
+  echo "[$(date)] [4/4] 未上传(默认; 要传: UPLOAD=1 或首参 upload) -> 跳过 (v21 已生成: $V21, 校验已过)"
 fi
 echo "[$(date)] ===== leju_zhengzhou: ALL DONE ====="
