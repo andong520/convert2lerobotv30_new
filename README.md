@@ -1,317 +1,388 @@
-# RoboMIND → LeRobot 数据转换流水线 · 使用教程
+# convert2lerobotv30_new — RoboMIND → LeRobot 转换 & 上传 完整使用文档
 
-> 适用目录：`/root/convert2lerobotv30_new/`（1 号机 `my-deliver-chenandong`）
-> 数据流：**原始 H5 → LeRobot v3.0 → LeRobot v2.1 → 校验 → 上传 BAIHU_v3.0-p3**
-
----
-
-## 0. 一句话
-
-每个机型一条流水线，跑一个 `pipelines/run_<机型>.sh` 就能把该机型的原始采集数据
-从华为云拉下来 → 转成 v3.0 → 降成 v2.1 → 自动校验维度/相机 → 校验通过才上传到云端。
-
-**三层脚本**（从上到下）：
-```
-pipelines/run_X.sh   ← 全流程(转换→v21→校验→上传)；日常用这层
-   └ 调 shanghai|zhengzhou/convert_all_X.py   ← 驱动：批量(读清单→逐任务下载→调对齐)，产出 v30
-        └ 调 align_scripts/X_align2lerobot_v30*.py   ← 对齐：把【单个任务】的 H5 转成【单个】v3.0 数据集
-```
+> 把原始 HDF5(青龙数采)转成 LeRobot v2.1,校验后上传到云端 OBS 的 BAIHU 数据集。
+> 本文档覆盖**全部用法**:转换、上传、校验、审核、机型规格、排查。
 
 ---
 
-## 1. 目录结构
+## 目录
+1. [整体流程与架构](#1-整体流程与架构)
+2. [目录结构](#2-目录结构)
+3. [三台机器分工](#3-三台机器分工)
+4. [快速开始(最常用命令)](#4-快速开始最常用命令)
+5. [第一部分:转换(pipelines/run_*.sh)](#5-第一部分转换)
+6. [第二部分:上传(upload_*.sh)](#6-第二部分上传)
+7. [第三部分:校验与审核](#7-第三部分校验与审核)
+8. [机型规格表](#8-机型规格表)
+9. [底层:驱动与 align 脚本](#9-底层驱动与-align-脚本)
+10. [日志与状态文件](#10-日志与状态文件)
+11. [配置与凭证](#11-配置与凭证)
+12. [常见问题排查](#12-常见问题排查)
+
+---
+
+## 1. 整体流程与架构
+
+```
+原始 HDF5 (青龙数采, 云端 OBS)
+   │  [1/4] rclone 下载 + align 脚本转换
+   ▼
+LeRobot v3.0  (/mnt/sdc/<robot>_<region>_v30_limited60/)
+   │  [2/4] convert.py 转 v2.1
+   ▼
+LeRobot v2.1  (/mnt/sdc/<robot>_<region>_v21_limited60/)
+   │  [3/4] _verify_v21.py 校验(维度/相机/坏文件)
+   ▼
+   │  [4/4] rclone 上传 + check 核验  (默认关, 或用 upload_*.sh)
+   ▼
+云端 OBS: huawei-cloud:openloong-bigmodel/lerobotv21/BAIHU_v4.0-pN/
+```
+
+**三层脚本架构**(从上到下越来越底层):
+
+| 层 | 位置 | 作用 |
+|---|---|---|
+| ① 全流程编排 | `pipelines/run_<机型>.sh` | 自包含 4 段:H5→v30→v21→校验→(可选)上传 |
+| ② 批量驱动 | `shanghai/convert_all_*.py`、`zhengzhou/convert_all_*.py` | 读 Excel 清单、按 robot_type 过滤、逐任务下载→调 align→删原始 |
+| ③ 单任务转换 | `align_scripts/<机型>_align2lerobot_v30*.py` | 单个 task 的 H5→v30 转换(维度对齐/夹爪 clip) |
+
+**上传**另有独立脚本 `pipelines/upload_shanghai.sh` / `upload_zhengzhou.sh`(纯上传,不重转)。
+
+---
+
+## 2. 目录结构
 
 ```
 /root/convert2lerobotv30_new/
-├── align_scripts/          # 12 个对齐脚本（单任务转换器，被驱动调用，也可单独跑调试）
-├── shanghai/               # 上海平台 8 个 convert_all 驱动（批量 H5→v30）
-├── zhengzhou/              # 郑州平台 3 个 convert_all 驱动（批量 H5→v30）
-├── pipelines/              # ★全流程脚本（转换→v21→校验→上传）
-│   ├── _verify_v21.py      #   通用校验器（参数化）
-│   ├── run_<机型>.sh        #   10 个：单机型全流程
-│   └── run_all.sh          #   串行队列（批量）
-├── analyze_lerobot_data.py # 数据集统计工具（可选）
-├── 全机型数据维度config说明.pdf   # 维度规范（真值来源）
-└── 数据转换第4批次20260624.xlsx   # 任务清单(各 run 脚本 EXCEL= 行指定; 换批次改那里或 --excel)
+├── pipelines/                      ← 【主要入口】全流程 + 上传 + 校验
+│   ├── run_<机型>.sh               (10 个) 单机型全流程
+│   ├── run_all.sh                  串行队列:一条命令跑多个机型
+│   ├── upload_shanghai.sh          上海纯上传 → BAIHU_v4.0-p3
+│   ├── upload_zhengzhou.sh         郑州纯上传 → BAIHU_v4.0-p2
+│   ├── _verify_v21.py              通用校验器(维度/相机/坏文件)
+│   └── check_all.sh                一条命令批量校验所有机型
+├── shanghai/                       ← 上海平台批量驱动
+│   ├── convert_all.py              基准驱动(青龙sheild)
+│   └── convert_all_<机型>.py       各机型驱动
+├── zhengzhou/                      ← 郑州平台批量驱动(huawei-henan 桶)
+│   └── convert_all_*.py
+├── align_scripts/                  ← 单任务转换器(12 个 align 脚本)
+│   └── <机型>_align2lerobot_v30*.py
+├── audit/                          ← 数据审核工具
+│   ├── deep_audit.py               深审(读真实 parquet)
+│   ├── audit.py                    浅审(只读 info.json)
+│   ├── expected.json               标准答案(维度/相机/clip)
+│   └── run_*.sh
+└── 数据转换第4批次*.xlsx            任务清单(Excel)
 ```
 
----
+**机型 key(= run 脚本后缀)与 robot_type 对应**(10 个 run 脚本 → 8 个 robot_type,GR2/lejukuafu 跨上海+郑州):
 
-## 2. 覆盖的机型（CAD 负责的 7 类 × 平台 = 10 条流水线）
-
-| run 名 | 平台 | 维度 | 相机 | 夹爪clip | 采集设备(过滤) | v30 输出目录(/mnt/sdc/) |
-|---|---|---|---|---|---|---|
-| astribot | 上海 | 25 | head,hand_left,hand_right,torso | [0,100] | 星尘智能S1 | astribots1_shanghai_v30_limited60 |
-| cobotmagic | 上海 | 20 | head,hand_left,hand_right | [0,0.08] | 松灵Aloha | cobotmagic_shanghai_v30_limited60 |
-| R1 | 上海 | 14 | head,hand_left,hand_right | [0,100] | 星海图R1 | xinghaitu_r1_shanghai_v30_limited60 |
-| ur5e | 上海 | 14 | head,hand_left,hand_right | [0,100] | UR5e | dualur5e_shanghai_v30_limited60 |
-| qinglongros1 | 上海 | 16 | head,hand_left,hand_right | [0,90] | 青龙 | qinglongros1_shanghai_v30_limited60 |
-| leju | 上海 | 30 | head,hand_left,hand_right | [0,100] | 乐聚KUAVO | lejukuafu_shanghai_v30_limited60 |
-| gr2 | 上海 | 41 | head_left,head_right | 指[-1.3,0]/拇指[0,1] | 傅利叶GR-2 | 傅利叶GR2_shanghai_v30_limited60 |
-| gr2_zhengzhou | 郑州 | 41 | head_left,head_right | 指[-1.3,0]/拇指[0,1] | 傅利叶GR2 | 傅利叶GR2_zhengzhou_v30_limited60 |
-| leju_zhengzhou | 郑州 | 30 | head,hand_left,hand_right | [0,100] | 乐聚KUAVO | 乐聚KUAVO_zhengzhou_v30_limited60 |
-| qinglongros2_zhengzhou | 郑州 | 33 | head,hand_left,hand_right | [0,90] | 青龙ROS2 | qinglongros2_zhengzhou_v30_limited60 |
-
-> v21 目录名 = v30 名把 `_v30` 换成 `_v21`。`傅利叶` 上海过滤用带连字符 `傅利叶GR-2`、郑州用 `傅利叶GR2`；`青龙` 上海=ROS1、郑州=ROS2，别混。
-
----
-
-## 3. 运行前提
-
-- **在哪跑**：1 号机 `my-deliver-chenandong`，先 `ssh my-deliver-chenandong`。
-- **Python**：统一 `/root/miniconda3/bin/python3`（脚本里已写死）。
-- **rclone**：下载用 `/root/.config/rclone/rclone.conf`（上海 `huawei-cloud` / 郑州 `huawei-henan`，驱动内部指定）；上传用 `/root/.config/rclone/rclone_shanghai.conf`。
-- **磁盘**：中间产物全在 `/mnt/sdc/`。
-- **长任务**：务必 `nohup ... &` 或 `tmux`。
-
----
-
-## 4. 快速开始（3 条够用）
-
-```bash
-ssh my-deliver-chenandong
-cd /root/convert2lerobotv30_new
-
-bash pipelines/run_leju.sh                              # 单机型(默认不传; 要传 UPLOAD=1)
-bash pipelines/run_all.sh --excel /path/x.xlsx          # 换批次/指定清单(命令行接口)
-nohup bash pipelines/run_all.sh >/dev/null 2>&1 &       # 全部串行(后台)
-tail -f /mnt/sdc/pipeline_run_all.log                   # 看进度
-UPLOAD=1 bash pipelines/run_all.sh                     # 要上传时(默认不传)
-```
-
----
-
-## 5. 全流程脚本 pipelines/ 用法
-
-### 5.1 单机型全流程（默认不上传）
-```bash
-bash pipelines/run_leju.sh
-```
-四阶段：H5→v30 → v30→v21 → 校验 →（可选）上传。**默认不上传**;校验不过自动停。
-
-### 5.2 上传开关（默认不传)
-```bash
-UPLOAD=1 bash pipelines/run_leju.sh      # 开启上传(默认不传); 或: bash pipelines/run_leju.sh upload
-```
-
-### 5.3 串行队列
-```bash
-bash pipelines/run_all.sh                 # 全部(默认不传)
-bash pipelines/run_all.sh leju gr2 R1     # 只跑指定几个
-bash pipelines/run_all.sh upload         # 全部并上传(默认不传)
-```
-改顺序/成员：编辑 `pipelines/run_all.sh` 的 `QUEUE=( ... )`，行首加 `#` 跳过。失败不中断，结尾出汇总表。
-
-### 5.4 后台 + 日志
-```bash
-nohup bash pipelines/run_gr2.sh >/dev/null 2>&1 &
-tail -f /mnt/sdc/pipeline_gr2.log
-```
-
-### 5.5 单独校验某个 v21 目录
-```bash
-python3 pipelines/_verify_v21.py --root /mnt/sdc/lejukuafu_shanghai_v21_limited60 \
-  --state-dim 30 --cams head,hand_left,hand_right
-```
-
----
-
-### 5.6 一次校验所有机型（check_all.sh）
-```bash
-bash pipelines/check_all.sh                 # 查本机 /mnt/sdc 下所有机型 v21
-bash pipelines/check_all.sh leju gr2        # 只查指定几个
-BASE_DATA=/挂载点 bash pipelines/check_all.sh # 查别处(同步/挂载来的其他机器数据)
-# 查云端/baiduyun2 汇总(所有机器上传后都在 BAIHU，一处查全部)：
-#   先把 pipelines/_verify_v21.py 和 check_all.sh 拷到该机器(纯标准库零依赖)，再：
-MODE=baihu BASE_DATA=/qinglong_datasets/qinglong/lerobotv21/BAIHU_v3.0-p3 bash check_all.sh
-```
-- 对 10 个机型各自带期望维度/相机循环跑 `_verify_v21.py`，结尾出通过/不通过汇总。
-- **check 跟着“运行它的机器+指定目录”走**，不是每台机器自带；最省事是在 BAIHU 汇总处用 `MODE=baihu` 一次查所有机器的最终产出。
-
----
-
-## 6. ★驱动脚本 shanghai/ & zhengzhou/ 详解（convert_all_*.py）
-
-### 6.1 这层是干什么的
-**批量编排器**，只负责 **H5 → v3.0** 这一步（不降 v21、不校验、不上传）。它做的事：
-1. 读 `excel_path` 指定的清单表（`sheet_name`），筛出 `设备类型 == robot_type` 的所有任务；
-2. 对每个任务：用 rclone 从 `obs_base_path` 下载原始 H5（**每任务最多 `MAX_DOWNLOAD_PER_ID=60` 条**）；
-3. 调对应**对齐脚本**（subprocess）把该任务转成 v3.0，写到 `output_base_path/<task_id>`；
-4. 转成功就 `rm -rf` 该任务的本地原始数据（省盘）；失败保留；
-5. 全程写一个**状态文件**（`log_file_path`），支持断点续传。
-6. 流水线式：边转当前任务边预下载下一个（`pipeline_buffer_size=3`）。
-
-### 6.2 命令行参数（只有两个）
-```
-python3 <驱动.py>                      # 全量跑（从头；会重建状态文件）
-python3 <驱动.py> --resume             # 断点续传（-r 或裸 resume 等价）：跳过已成功，重试 failed/pending
-python3 <驱动.py> --task-range 1-50    # 只处理过滤后列表的第 1~50 个任务（1-based，闭区间）
-```
-- `--resume`、`-r`、`resume`（无减号）三种写法等价。
-- `--task-range` 用于**多机分片**：比如 A 机 `1-100`、B 机 `101-200` 同时转不同段。
-
-### 6.3 直接使用示例（只想要 v30 / 续传 / 分片时用这层）
-```bash
-cd /root/convert2lerobotv30_new
-
-# 上海乐聚：全量转 v30
-python3 shanghai/convert_all_leju.py
-
-# 中断后接着转
-python3 shanghai/convert_all_leju.py --resume
-
-# 只转前 50 个任务（分片）
-python3 shanghai/convert_all_leju.py --task-range 1-50
-
-# 郑州乐聚（注意是 zhengzhou/ 目录）
-python3 zhengzhou/convert_all_leju_zhengzhou.py --resume
-
-# 后台 + 日志
-nohup python3 shanghai/convert_all_gr2.py > /mnt/sdc/gr2_v30.log 2>&1 &
-tail -f /mnt/sdc/gr2_v30.log
-```
-> 它只产出 v30。要 v21+校验+上传，用 `pipelines/`（pipelines 内部就是先调这个驱动，再做后续 3 步）。
-
-> ⭐ **换批次/选清单**: ① 命令行接口 `bash pipelines/run_all.sh --excel /path/x.xlsx`(单次; 单机型 `run_<机型>.sh --excel <xlsx> [--sheet <名>]`); ② 长期默认: 改各 `run_<机型>.sh` 配置块开头的 `EXCEL=` 行。驱动从 `BATCH_XLSX`/`BATCH_SHEET` 读(默认=当前批次)。
-
-### 6.4 每个驱动的其余固定配置（写死在脚本 `__main__` 里）
-所有驱动公共：`rclone_config=/root/.config/rclone/rclone.conf`、`excel_path`(由 run 脚本 `EXCEL=` 行 / `--excel` 决定, 默认当前批次)、`MAX_DOWNLOAD_PER_ID=60`、`MAX_COUNT=300000`(子目录上限,实际不限)。各自不同的：
-
-| 驱动 | sheet | obs 桶 | robot_type | 对齐脚本 | v30 输出 | 下载缓存 |
-|---|---|---|---|---|---|---|
-| shanghai/convert_all.py(arx,ZXD) | 模型内部需求-上海 | huawei-cloud | 方舟无限arx-acone | arx_align | arx_loong_shanghai_v30_limited60 | align |
-| shanghai/convert_all_astribot.py | 模型内部需求-上海 | huawei-cloud | 星尘智能S1 | astribot_s1_align | astribots1_shanghai_v30_limited60 | align_astribot |
-| shanghai/convert_all_cobotmagic.py | 模型内部需求-上海 | huawei-cloud | 松灵Aloha | aloha_align | cobotmagic_shanghai_v30_limited60 | align_cobotmagic |
-| shanghai/convert_all_R1.py | 模型内部需求-上海 | huawei-cloud | 星海图R1 | R1_align | xinghaitu_r1_shanghai_v30_limited60 | align_r1 |
-| shanghai/convert_all_ur5e.py | 模型内部需求-上海 | huawei-cloud | UR5e | ur5e_align | dualur5e_shanghai_v30_limited60 | align_ur5e |
-| shanghai/convert_all_qinglongros1.py | 模型内部需求-上海 | huawei-cloud | 青龙 | qinglongros1_align | qinglongros1_shanghai_v30_limited60 | align_qinglong |
-| shanghai/convert_all_leju.py | 模型内部需求-上海 | huawei-cloud | 乐聚KUAVO | leju_align | lejukuafu_shanghai_v30_limited60 | align_leju |
-| shanghai/convert_all_gr2.py | 模型内部需求-上海 | huawei-cloud | 傅利叶GR-2 | gr2_align | 傅利叶GR2_shanghai_v30_limited60 | align_gr2_sh |
-| zhengzhou/convert_all_zhengzhou.py | 郑州平台 | huawei-henan | 傅利叶GR2 | gr2_align | 傅利叶GR2_zhengzhou_v30_limited60 | align(注意:与arx共用) |
-| zhengzhou/convert_all_leju_zhengzhou.py | 郑州平台 | huawei-henan | 乐聚KUAVO | leju_align | 乐聚KUAVO_zhengzhou_v30_limited60 | align_leju_zz |
-| zhengzhou/convert_all_qinglongros2_zhengzhou.py | 郑州平台 | huawei-henan | 青龙ROS2 | qinglongros2_align | qinglongros2_zhengzhou_v30_limited60 | align_qinglong_zz |
-
-> 郑州驱动还额外把 Excel 列名映射成郑州表的（设备名称/步骤(处理后)/步骤(英文)/总采集时长）。改这些值直接编辑对应 .py 的 `__main__` 段。
-
-### 6.5 状态文件 & 断点续传
-- 每个驱动写一个状态 txt（如 `/root/convert2lerobotv30_new/convert_all_leju_shanghai_status.txt`），记录每个任务的 下载/转换/删除 状态。
-- `--resume` 会读它，**跳过已成功**的，只重试 failed/pending/skipped。
-- 不加 `--resume` 直接跑 = 重建状态、从头来。
-- ⚠️ `pipelines/run_X.sh` 启动时会 `rm` 这个状态文件再不带 resume 地跑 → 即每次 pipeline 都是干净全量。要续传请**直接跑驱动加 --resume**。
-
----
-
-## 7. 对齐脚本 align_scripts/ 详解（单任务转换器）
-
-### 7.1 这层是干什么的
-把**单个任务**的 H5 目录转成**单个** v3.0 数据集。驱动是循环调它；你也能单独跑它来**转/调试某一个任务**。
-
-### 7.2 命令行参数
-| 参数 | 必填 | 默认 | 说明 |
-|---|---|---|---|
-| `--input` | 是 | — | 一个任务的 H5 目录（里面是若干 episode 的 .h5） |
-| `--output` | 是 | — | 输出的 v3.0 数据集目录 |
-| `--task` | 否 | manipulation_task | 任务文本/语言指令（可多词，空格分隔） |
-| `--repo_id` | 否 | =输出目录名 | 数据集 repo id |
-| `--fps` | 否 | 30 | 帧率 |
-| `--workers` | 否 | 8 | 并行进程数 |
-| `--vcodec` | 否 | libsvtav1 | 视频编码 |
-| `--crf` | 否 | 30 | 视频质量 |
-| `--cameras` | 仅 astribot | head hand_left hand_right torso | 导出哪些相机（可选含 stereo） |
-
-### 7.3 单独转一个任务（调试用）
-```bash
-cd /root/convert2lerobotv30_new
-
-# 把某个乐聚任务的 H5 转成一个 v3.0 数据集
-python3 align_scripts/leju_align2lerobot_v30_no_norm.py \
-  --input  /mnt/sdc/align_leju/<某任务task_id> \
-  --output /mnt/sdc/test_leju_one \
-  --task   "把杯子放到盘子上" \
-  --workers 8
-
-# astribot 指定相机（不导出 torso，只 3 路）
-python3 align_scripts/astribot_s1_align2lerobot_v30_no_norm.py \
-  --input /path/to/task --output /mnt/sdc/test_astri \
-  --cameras head hand_left hand_right
-```
-> 用途：单任务验证对齐逻辑、复现某条数据的问题，不必跑整个批量。维度/clip 由各脚本内部写死（见附录），命令行不改这些。
-
----
-
-## 8. 全流程 4 阶段详解（`pipelines/run_X.sh` 内部）
-
-| 阶段 | 做什么 | 产物 | 失败行为 |
-|---|---|---|---|
-| [1/4] H5→v30 | 跑 `convert_all_X.py`（见 §6） | `$V30` | 终止(exit 1) |
-| [2/4] v30→v21 | `/root/lerobot_v30_to_v21/convert.py --batch --workers N` | `$V21`（内含 `<robot>/`） | 终止(exit 1) |
-| [3/4] 校验 | `_verify_v21.py` 检查维度/相机/一致性/非空 | 判定 | 不上传(exit 2) |
-| [4/4] 上传 | 校验过才 `rclone copy` 到 `DEST`，再 `rclone check` | 云端 BAIHU/<robot>/ | 记录退出码 |
-
----
-
-## 9. 配置参考（改什么 → 改哪）
-
-| 想改 | 文件 | 位置 |
+| run 脚本 key | robot_type | 区 |
 |---|---|---|
-| 上传目标桶 | `pipelines/run_<机型>.sh` | `DEST=` |
-| v30→v21 并行 | `pipelines/run_<机型>.sh` | `WORKERS=` |
-| v21 输出目录 | `pipelines/run_<机型>.sh` | `V21=` |
-| 是否上传(默认不传) | 加 `UPLOAD=1` 或首参 `upload` | 环境变量/参数 |
-| **每任务条数(60)** | `shanghai|zhengzhou/convert_all_<机型>.py` | `MAX_DOWNLOAD_PER_ID` |
-| 过滤的设备/清单表/桶 | 同上驱动 .py | `robot_type` / `sheet_name` / `obs_base_path` |
-| 对齐时的相机/编码 | 调对齐脚本时传 `--cameras/--vcodec` | 命令行 |
-| 维度/clip 逻辑 | `align_scripts/<机型>_align*.py` | `*_CONFIG`、`np.clip` |
-| 队列顺序/成员 | `pipelines/run_all.sh` | `QUEUE=( )` |
+| astribot | AstribotS1 | 上海 |
+| cobotmagic | cobotmagic | 上海 |
+| R1 | xinghaitu_r1 | 上海 |
+| ur5e | DualUR5e | 上海 |
+| qinglongros1 | QinLongROS1 | 上海 |
+| leju | lejukuafu | 上海 |
+| gr2 | GR2 | 上海 |
+| gr2_zhengzhou | GR2 | 郑州 |
+| leju_zhengzhou | lejukuafu | 郑州 |
+| qinglongros2_zhengzhou | QinLongROS2 | 郑州 |
 
 ---
 
-## 10. 日志与监控
+## 3. 三台机器分工
 
-- 全流程单机型：`/mnt/sdc/pipeline_<机型>.log`
-- 队列总览：`/mnt/sdc/pipeline_run_all.log`（每机型 rc + 结尾汇总表）
-- 驱动单独跑：你自己 `> xxx.log` 重定向（如 §6.3）
-- **退出码**：`0`成功 / `1`转换失败 / `2`校验未过(未上传) / `MISSING`脚本缺失
+| 机器 | SSH 别名 | 角色 | 负责 |
+|---|---|---|---|
+| 1 号机 | `my-deliver-chenandong` | 转换源/上海 | 上海机型(主力,如 gr2) |
+| 2 号机 | `my-deliver-chenandong2` | 上海 | 上海机型(如 astribot、R1) |
+| 3 号机 | `my-deliver-chenandong3` | 郑州 | 全部郑州机型 |
+
+- **三台代码完全一致**(同 `/root/convert2lerobotv30_new`,同 md5)。哪台跑哪个机型,脚本都一样。
+- 数据盘 `/mnt/sdc`(20T)各机独立,存各自的 v30/v21。
+- **原则**:郑州尽量集中在 3 号机;上海在 1、2 号机分。
 
 ---
 
-## 11. 输出位置
-- v3.0：`/mnt/sdc/<...>_v30_limited60/<task_id>/`
-- v2.1：`/mnt/sdc/<...>_v21_limited60/<robot_type>/<dataset>/`
-- 云端：`huawei-cloud:openloong-bigmodel/lerobotv21/BAIHU_v3.0-p3/<robot_type>/`
+## 4. 快速开始(最常用命令)
+
+```bash
+cd /root/convert2lerobotv30_new
+
+# ── 转换(H5→v30→v21→校验,默认不上传) ──
+bash pipelines/run_gr2.sh                 # 单机型全流程
+bash pipelines/run_all.sh gr2 astribot    # 多机型串行
+bash pipelines/run_all.sh                 # 跑默认队列(全部上海机型)
+
+# ── 上传(转好之后,纯上传到 OBS) ──
+DRYRUN=1 bash pipelines/upload_shanghai.sh    # 上海:先预览
+bash pipelines/upload_shanghai.sh             # 上海:真传(本机所有已转好的)
+DRYRUN=1 bash pipelines/upload_zhengzhou.sh   # 郑州:先预览
+bash pipelines/upload_zhengzhou.sh            # 郑州:真传
+
+# ── 校验/审核 ──
+bash pipelines/check_all.sh                                # 批量校验
+python3 audit/deep_audit.py --data-root /mnt/sdc --only GR2  # 深度审核
+```
+
+---
+
+## 5. 第一部分:转换
+
+### 5.1 单机型全流程 `run_<机型>.sh`
+
+```bash
+bash pipelines/run_gr2.sh
+```
+自动跑 4 段(任一段失败即停):
+- `[1/4]` H5 → v30(rclone 下载每个 task ≤60 集,调 align 转换,转完删原始)
+- `[2/4]` v30 → v21(`convert.py --batch --workers 16`)
+- `[3/4]` 校验 v21(`_verify_v21.py`,维度/相机/坏文件,不过就停、不上传)
+- `[4/4]` 上传(**默认关**;开启见下)
+
+日志:`/mnt/sdc/pipeline_<机型>.log`。
+
+### 5.2 上传开关(默认不传)
+
+```bash
+bash pipelines/run_gr2.sh            # 默认:转完校验, 停在本地 v21, 不上传
+UPLOAD=1 bash pipelines/run_gr2.sh   # 转完直接上传
+bash pipelines/run_gr2.sh upload     # 同上(首参 upload)
+```
+> 推荐:转换与上传分开 —— 用 run 脚本转换(不传),人工/审核确认后再用 `upload_*.sh` 传。
+
+### 5.3 一键批量 `run_all.sh`
+
+```bash
+bash pipelines/run_all.sh                      # 默认队列(全部上海机型)
+bash pipelines/run_all.sh gr2 astribot R1      # 只跑指定几个
+bash pipelines/run_all.sh gr2_zhengzhou leju_zhengzhou   # 郑州两个
+bash pipelines/run_all.sh upload gr2           # 首参 upload = 边转边传
+```
+- 串行:一个转完再下一个;某个失败不中断,结尾汇总退出码。
+- 日志:`/mnt/sdc/pipeline_run_all.log`。
+
+### 5.4 换批次 / 换清单(Excel)
+
+每个 `run_<机型>.sh` 配置块**开头有可见的 `EXCEL=` / `SHEET=` 行**,换批次改这里;或命令行覆盖:
+
+```bash
+# 命令行临时覆盖(优先级最高)
+bash pipelines/run_gr2.sh --excel /root/convert2lerobotv30_new/数据转换第5批次.xlsx
+bash pipelines/run_gr2.sh --excel <xlsx> --sheet 模型内部需求
+bash pipelines/run_all.sh --excel <xlsx>          # 整队列换清单
+```
+- 上海 sheet 默认 `模型内部需求`;郑州 sheet 默认 `郑州平台`。
+- 驱动从环境变量 `BATCH_XLSX` / `BATCH_SHEET` 读(run 脚本会自动 export)。
+
+### 5.5 配置块逐行说明(以 `run_gr2.sh` 为例)
+
+```bash
+EXCEL=".../数据转换第4批次*.xlsx"   # ★任务清单(换批次改这)
+SHEET="模型内部需求"                # ★Excel sheet(上海)/ 郑州平台(郑州)
+DRIVER="$BASE/shanghai/convert_all_gr2.py"   # 用哪个批量驱动
+ALIGN_CACHE="/mnt/sdc/align_gr2"             # 原始下载缓存(转完删)
+V30="/mnt/sdc/傅利叶GR2_shanghai_v30_limited60"   # v30 输出
+V21="/mnt/sdc/傅利叶GR2_shanghai_v21_limited60"   # v21 输出
+ROBOT="GR2"           # robot_type(= v21 里的子目录名)
+STATE_DIM=41          # 期望维度(校验用)
+CAMS="head_left,head_right"   # 期望相机(校验用)
+DEST="huawei-cloud:openloong-bigmodel/lerobotv21/BAIHU_v4.0-p3"  # 上传目标
+CFG=/root/.config/rclone/rclone_shanghai.conf   # 上传用 rclone 配置
+```
+
+### 5.6 断点续传 / 分片(底层驱动参数)
+
+直接调驱动(绕过 run 脚本)时可用:
+```bash
+python3 shanghai/convert_all_gr2.py --resume          # 按状态文件断点续传
+python3 shanghai/convert_all_gr2.py --task-range 0-100  # 只转第 0~100 个任务(多机分片)
+```
+状态文件:`convert_all_<机型>_status.txt`(记录每个 task 的下载/转换/删除状态)。
+
+---
+
+## 6. 第二部分:上传
+
+> 把**已转好且校验过**的本地 v21 上传到 OBS。**纯上传,不重新转换。**
+
+### 6.1 两个脚本
+
+| 脚本 | 管 | 目标 |
+|---|---|---|
+| `upload_shanghai.sh` | 上海 7 机型 | `BAIHU_v4.0-p3` |
+| `upload_zhengzhou.sh` | 郑州 3 机型 | `BAIHU_v4.0-p2` |
+
+配置全部内置(目录/维度/相机/目标),自包含。
+
+### 6.2 用法
+
+```bash
+cd /root/convert2lerobotv30_new
+
+DRYRUN=1 bash pipelines/upload_shanghai.sh        # 【先跑】预览本机所有上海待传, 不真传
+bash pipelines/upload_shanghai.sh                 # 真传:本机所有已转好的上海机型
+bash pipelines/upload_shanghai.sh gr2 astribot    # 只传指定机型(key)
+NOVERIFY=1 bash pipelines/upload_shanghai.sh       # 跳过上传前复核(不建议)
+
+# 郑州同理
+DRYRUN=1 bash pipelines/upload_zhengzhou.sh
+bash pipelines/upload_zhengzhou.sh qinglongros2_zhengzhou
+```
+**大数据集建议 nohup**(防 SSH 断,gr2 那种几百集的):
+```bash
+nohup bash pipelines/upload_shanghai.sh gr2 > /mnt/sdc/up_gr2.log 2>&1 &
+```
+
+### 6.3 自动行为
+- 本机**无该机型 v21 → 自动跳过**(不报错)。
+- 上传前**复核** `_verify_v21.py`(维度/相机/坏文件),**不过就拒传**。
+- `rclone copy` → 传完 `rclone check --one-way` **核验云端==本地**。
+- **增量**:断了/补传,重跑同一条命令即可(已存在的跳过)。
+- 日志:`/mnt/sdc/upload_shanghai.log` / `upload_zhengzhou.log`。
+
+### 6.4 上传目标约定(★重要)
+
+```
+huawei-cloud:openloong-bigmodel/lerobotv21/BAIHU_<版本>-<分区>/<robot_type>/<task_id>/
+```
+- **`-p3` = 上海**,**`-p2` = 河南/郑州**(分区,不是补丁号;同桶并列)。
+- 当前批次 **v4.0**:上海 → `BAIHU_v4.0-p3`,郑州 → `BAIHU_v4.0-p2`。
+- 换版本/分区:改各 `run_<机型>.sh` 的 `DEST=` 行(upload 脚本里也有 `DEST=` 各一行)。
+
+### 6.5 OBS ≠ GPFS(★必看)
+- 上传只能传到 **OBS 桶**(`huawei-cloud:`)。转换机上**没挂** `/qinglong_datasets`。
+- baiduyun2 的 `/qinglong_datasets/qinglong/lerobotv21/`(训练机读的 **GPFS**)是**另一套存储**,OBS 传完**不会自动出现在这**,需要单独一步 **OBS→GPFS 同步**。
+- 所以:`rclone check` 过了 = 数据在 OBS 完整;但在 GPFS 看不到 = 还没同步,正常。
+
+### 6.6 自动上传哨兵(转完即传)
+转换还在跑、想转完自动上传时,挂个 nohup 哨兵(等转换脚本退出 = 过了校验):
+```bash
+# 上海 gr2 转完自动传
+nohup bash -c 'while pgrep -f "run_gr2[.]sh" >/dev/null; do sleep 300; done; \
+  cd /root/convert2lerobotv30_new && bash pipelines/upload_shanghai.sh gr2' \
+  > /mnt/sdc/auto_upload_gr2.log 2>&1 &
+```
+> `[.]` 写法是为了让 pgrep 不匹配到哨兵自己。郑州把 `run_gr2[.]sh`→`run_all[.]sh`、`upload_shanghai`→`upload_zhengzhou`。
+
+---
+
+## 7. 第三部分:校验与审核
+
+### 7.1 通用校验器 `_verify_v21.py`(快,标准库)
+只看 info.json 声明的:维度/相机/签名一致/空集/坏文件。
+```bash
+python3 pipelines/_verify_v21.py --root /mnt/sdc/<v21目录> --state-dim 41 --cams head_left,head_right
+```
+退出码 0=过 / 1=不过。run 脚本的 [3/4] 和 upload 的复核都用它。
+
+### 7.2 批量校验 `check_all.sh`
+一条命令对所有机型循环校验(自带各机型期望维度/相机)。
+```bash
+bash pipelines/check_all.sh
+```
+
+### 7.3 数据审核 `audit/`(更严)
+
+| 脚本 | 查什么 | 依赖 |
+|---|---|---|
+| `deep_audit.py` | **深审**:读真实 parquet —— 维度、NaN/Inf、**夹爪值是否真在 clip 内**、视频数=ep×相机、夹爪实测范围 | pandas |
+| `audit.py` | **浅审**:只看 info.json | 无 |
+
+```bash
+python3 audit/deep_audit.py --data-root /mnt/sdc                    # 审所有机型
+python3 audit/deep_audit.py --data-root /mnt/sdc --only GR2         # 只审一个
+python3 audit/deep_audit.py --data-root /mnt/sdc --datasets 0 --episodes 0   # 全量深审
+python3 audit/audit.py --data-root /mnt/sdc --only GR2              # 浅审(快)
+```
+标准答案在 `audit/expected.json`(改标准只改这里)。详见 `audit/README.md`。
+
+### 7.4 OBS 完整性核对(上传后)
+逐文件比对本地 v21 与 OBS(快,只比尺寸):
+```bash
+rclone check --config /root/.config/rclone/rclone_shanghai.conf \
+  /mnt/sdc/傅利叶GR2_shanghai_v21_limited60/GR2/ \
+  huawei-cloud:openloong-bigmodel/lerobotv21/BAIHU_v4.0-p3/GR2/ --one-way --size-only
+# 期望:0 differences found
+```
+
+---
+
+## 8. 机型规格表
+
+(来源 `audit/expected.json`;v21 子目录名 = robot_type;clip = 夹爪值域)
+
+| robot_type | 维度 | 相机 | 夹爪 clip | 区/上传分区 |
+|---|---|---|---|---|
+| AstribotS1 | 25 | head, hand_left, hand_right, **torso** | [0,100] | 沪 / p3 |
+| cobotmagic | 20 | head, hand_left, hand_right | [0,0.08]m | 沪 / p3 |
+| xinghaitu_r1 | 14 | head, hand_left, hand_right | [0,100] | 沪 / p3 |
+| DualUR5e | 14 | head, hand_left, hand_right | [0,100] | 沪 / p3 |
+| QinLongROS1 | 16 | head, hand_left, hand_right | [0,90] | 沪 / p3 |
+| lejukuafu | 30 | head, hand_left, hand_right | [0,100] | 沪+豫 / p3+p2 |
+| GR2 | 41 | head_left, head_right | 指[-1.3,0]/拇指pitch[0,1] | 沪+豫 / p3+p2 |
+| QinLongROS2 | 33 | head, hand_left, hand_right | [0,90] | 豫 / p2 |
+
+> AstribotS1 是 25 维 **4 相机(含 torso)**,注意不是旧版 22 维/3 相机。
+
+---
+
+## 9. 底层:驱动与 align 脚本
+
+### 9.1 批量驱动 `convert_all_*.py`
+读 Excel → 按 robot_type 过滤任务 → 逐 task:rclone 下载(≤60 集/task)→ 调 align 脚本 → 转成功删原始 → 写状态文件。
+- 环境变量:`BATCH_XLSX` / `BATCH_SHEET`(run 脚本自动设)。
+- CLI:`--resume`(断点续传)、`--task-range A-B`(分片)。
+- 上海基准 = `shanghai/convert_all.py`;郑州基准 = `zhengzhou/convert_all_zhengzhou.py`(走 huawei-henan 下载桶)。
+
+### 9.2 单任务转换 `align_scripts/<机型>_align2lerobot_v30*.py`
+单独调试一个 task:
+```bash
+python3 align_scripts/gr2_align2lerobot_v30_no_norm.py \
+  --input <原始task目录> --output <v30输出/task_id> --task "任务描述" --workers 20
+```
+负责:维度对齐、关节名重排、夹爪 clip。
+
+---
+
+## 10. 日志与状态文件
+
+| 文件 | 内容 |
+|---|---|
+| `/mnt/sdc/pipeline_<机型>.log` | 单机型全流程日志 |
+| `/mnt/sdc/pipeline_run_all.log` | 批量队列日志 |
+| `/mnt/sdc/upload_shanghai.log` / `upload_zhengzhou.log` | 上传日志 |
+| `/mnt/sdc/auto_upload_*.log` | 哨兵自动上传日志 |
+| `convert_all_<机型>_status.txt` | 驱动状态(断点续传依据) |
+| `/mnt/sdc/<robot>_<region>_v30/v21_limited60/` | v30 / v21 输出数据 |
+
+---
+
+## 11. 配置与凭证
+
+- **下载** rclone 配置:`/root/.config/rclone/rclone.conf`(remote:`huawei-cloud` 上海桶 + `huawei-henan` 郑州桶)。
+- **上传** rclone 配置:`/root/.config/rclone/rclone_shanghai.conf`(三台上是 `rclone.conf` 的软链,含 `huawei-cloud`)。
+- Python:`/root/miniconda3/bin/python3`。
+- 凭证全在 rclone 配置里(外部),代码/文档不含密钥。
 
 ---
 
 ## 12. 常见问题排查
-- **v30 失败**：看 `pipeline_X.log`；多为 rclone 下载失败/原始 H5 异常。可 `python3 shanghai/convert_all_X.py --resume` 续传。
-- **想只重转某几个任务**：`--task-range A-B` 配 `--resume`。
-- **校验未过(rc=2)**：日志列出不符签名；对照 §2/附录。
-- **上传失败**：检查 `rclone_shanghai.conf`/网络；`rclone copy` 幂等可重跑。
-- **磁盘满**：清 `/mnt/sdc/align_*` 缓存或旧 v30/v21。
-- **缓存冲突**：`zhengzhou/convert_all_zhengzhou`(傅利叶郑州) 与 arx 基准共用 `/mnt/sdc/align`，别同时跑。
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| `[2/4] Input path does not exist: .../_v30_limited60` | 该机型本批 **0 任务(无数据)**,[1/4] 没产 v30 → 正常,不是真失败 |
+| run_all 显示"失败 N 个" | 多半是上面的"无数据"机型;看 `pipeline_<机型>.log` 确认 |
+| 上传后 `/qinglong_datasets` 看不到 | 正常 —— 数据在 **OBS**,GPFS 要单独 OBS→GPFS 同步(见 §6.5) |
+| 上传 `复核未通过,拒传` | v21 维度/相机/坏文件不对;先 `deep_audit.py` 查,别 `NOVERIFY=1` 硬传 |
+| `rclone check` 有 differences | 上传不完整,重跑 `upload_*.sh <机型>`(增量补齐) |
+| gr2 v21 目录用 robot key 查为空 | 输出目录按 **robot_type 中文名**(如 `傅利叶GR2_…`),不是英文 key |
+| SSH 监控断了报 exit 255 | 是监控 SSH 断,不是作业死;作业 nohup 的话还在跑,重连看进程 |
+| 同一机型两个队列并跑 | 会抢同一 v30/缓存目录;按进程组杀掉多余的(`kill -- -<PGID>`) |
 
 ---
 
-## 13. 注意事项
-- **60 条限制**：所有驱动默认 `MAX_DOWNLOAD_PER_ID=60`（limited60）。全量改它。
-- **pipelines 每次重头转 v30**；续传走驱动 `--resume`。
-- **范围**：CAD 7 机型。`align_scripts/` 里 ZXD 的 tianji/ginie1/arx 等不在这 10 条内（tianji 脚本还有已知 bug，归 ZXD）。
-- **郑州上传目标**：3 个郑州 `pipelines/run_*_zhengzhou.sh` 的 `DEST` 默认也 BAIHU，按需改。
-- **备份**：改造前快照 `/root/convert2lerobotv30_new_backup_1.tgz`。
-
----
-
-## 附录：机型维度 & clip 规范（对照两份 PDF）
-
-| 机型 | 维度 | clip |
-|---|---|---|
-| 星海图R1 | 14 | [0,100] |
-| 乐聚夸父 | 30 | [0,100] |
-| 青龙ROS1 | 16 | [0,90] |
-| 青龙ROS2 | 33 | [0,90] |
-| 松灵aloha/cobotmagic | 20 | 0.0–0.08(m) |
-| 星尘S1 | 25 | 0–100(mm) |
-| UR5e | 14 | 0–100 |
-| 傅利叶GR2 | 41 | 12指:pinky/ring/middle/index/thumb_yaw[-1.3,0], thumb_pitch[0,1.0] |
-
-> 真值：`/home/andong/Downloads/全机型effector范围.pdf`(clip)、`全机型数据维度config说明.pdf`(维度)。2026-06-24 已逐项审核一致。
+*维护:改机型规格只改 `audit/expected.json` + 对应 `run_<机型>.sh` 的 STATE_DIM/CAMS;改批次改 `EXCEL=`;改上传目标改 `DEST=`。三台保持代码一致(同 md5)。*

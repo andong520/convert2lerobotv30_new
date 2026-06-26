@@ -22,7 +22,7 @@ ROBOT="DualUR5e"          # v21 robot-layer 子目录 = robot_type
 STATE_DIM=14
 CAMS="head,hand_left,hand_right"
 WORKERS=16
-DEST="huawei-cloud:openloong-bigmodel/lerobotv21/BAIHU_v3.0-p3"   # 上传目标(郑州数据如需别处, 改这里)
+DEST="huawei-cloud:openloong-bigmodel/lerobotv21/BAIHU_v4.0-p3"   # 上传目标(郑州数据如需别处, 改这里)
 CFG=/root/.config/rclone/rclone_shanghai.conf
 # ===================================
 LOG=/mnt/sdc/pipeline_ur5e.log
